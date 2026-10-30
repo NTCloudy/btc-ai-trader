@@ -17,10 +17,14 @@ from pathlib import Path
 from .sim import Bar, resample
 
 ROOT = Path(__file__).resolve().parents[1]
-H1 = ROOT / "data" / "h1.csv"
-CACHE = ROOT / "data" / "bars.pkl"
-FUND = ROOT / "data" / "funding.json"
 FAPI = "https://fapi.binance.com/fapi/v1"
+
+
+def _paths(symbol: str):
+  if symbol == "BTCUSDT":  # Original BTC-only file names.
+    return ROOT / "data" / "h1.csv", ROOT / "data" / "bars.pkl", ROOT / "data" / "funding.json"
+  return (ROOT / "data" / f"h1_{symbol}.csv", ROOT / "data" / f"bars_{symbol}.pkl",
+          ROOT / "data" / f"funding_{symbol}.json")
 UTC = timezone.utc
 
 
@@ -32,7 +36,10 @@ def _get(url: str, timeout: int = 10):
 
 class Market:
 
-  def __init__(self):
+  def __init__(self, symbol: str = "BTCUSDT"):
+    self.symbol = symbol
+    self.H1, self.CACHE, self.FUND = _paths(symbol)
+    self._meta_t = 0.0
     self.h1: list[Bar] = []
     self.live: Bar | None = None  # in-progress hour
     self.funding: dict[int, float] = {}
@@ -45,18 +52,18 @@ class Market:
 
   def _load(self):
     rows: dict[datetime, Bar] = {}
-    if CACHE.exists():
-      d = pickle.load(open(CACHE, "rb"))
+    if self.CACHE.exists():
+      d = pickle.load(open(self.CACHE, "rb"))
       for b in d["b60"]:
         rows[b.t] = Bar(b.t, b.o, b.h, b.l, b.c, b.v)
       self.funding.update(d.get("funding", {}))
-    if H1.exists():
-      for r in csv.reader(open(H1, encoding="utf-8")):
+    if self.H1.exists():
+      for r in csv.reader(open(self.H1, encoding="utf-8")):
         if r and r[0][0].isdigit():
           t = datetime.fromisoformat(r[0])
           rows[t] = Bar(t, *map(float, r[1:6]))
-    if FUND.exists():
-      self.funding.update({int(k): v for k, v in json.load(open(FUND)).items()})
+    if self.FUND.exists():
+      self.funding.update({int(k): v for k, v in json.load(open(self.FUND)).items()})
     self.h1 = [rows[k] for k in sorted(rows)]
     if self.h1 and self.h1[-1].t >= datetime.now(UTC).replace(minute=0, second=0, microsecond=0):
       self.h1.pop()  # Never keep an unfinished hour in the closed list.
@@ -66,7 +73,7 @@ class Market:
     if not new:
       return
     self.h1.extend(new)
-    with open(H1, "a", encoding="utf-8", newline="") as f:
+    with open(self.H1, "a", encoding="utf-8", newline="") as f:
       w = csv.writer(f)
       for b in new:
         w.writerow([b.t.isoformat(), b.o, b.h, b.l, b.c, b.v])
@@ -76,7 +83,7 @@ class Market:
     now = datetime.now(UTC)
     start = (self.h1[-1].t + timedelta(hours=1)) if self.h1 else now - timedelta(days=400)
     while True:
-      rows = _get(f"{FAPI}/klines?symbol=BTCUSDT&interval=1h&limit=1000&startTime={int(start.timestamp() * 1000)}")
+      rows = _get(f"{FAPI}/klines?symbol={self.symbol}&interval=1h&limit=1000&startTime={int(start.timestamp() * 1000)}")
       bars = [Bar(datetime.fromtimestamp(r[0] / 1000, UTC), float(r[1]), float(r[2]), float(r[3]), float(r[4]),
                   float(r[5])) for r in rows]
       closed = [b for b in bars if b.t + timedelta(hours=1) <= now]
@@ -85,17 +92,20 @@ class Market:
       if len(rows) < 1000:
         break
       start = bars[-1].t + timedelta(hours=1)
-    pi = _get(f"{FAPI}/premiumIndex?symbol=BTCUSDT")
-    self.mark, self.last_rate = float(pi["markPrice"]), float(pi["lastFundingRate"])
-    self.next_funding = datetime.fromtimestamp(pi["nextFundingTime"] / 1000, UTC)
-    self.price = self.live.c if self.live else self.mark
-    last_f = max(self.funding) if self.funding else int((now - timedelta(days=30)).timestamp() * 1000)
-    fr = _get(f"{FAPI}/fundingRate?symbol=BTCUSDT&limit=1000&startTime={last_f + 1}")
-    if fr:
-      for r in fr:
-        self.funding[int(r["fundingTime"]) // 3_600_000 * 3_600_000] = float(r["fundingRate"])
-      json.dump({str(k): v for k, v in self.funding.items() if k > (now - timedelta(days=400)).timestamp() * 1000},
-                open(FUND, "w"))
+    self.price = self.live.c if self.live else (self.h1[-1].c if self.h1 else None)
+    import time as _time
+    if _time.monotonic() - self._meta_t >= 300 or self.mark is None:  # Mark / funding every 5 minutes.
+      self._meta_t = _time.monotonic()
+      pi = _get(f"{FAPI}/premiumIndex?symbol={self.symbol}")
+      self.mark, self.last_rate = float(pi["markPrice"]), float(pi["lastFundingRate"])
+      self.next_funding = datetime.fromtimestamp(pi["nextFundingTime"] / 1000, UTC)
+      last_f = max(self.funding) if self.funding else int((now - timedelta(days=30)).timestamp() * 1000)
+      fr = _get(f"{FAPI}/fundingRate?symbol={self.symbol}&limit=1000&startTime={last_f + 1}")
+      if fr:
+        for r in fr:
+          self.funding[int(r["fundingTime"]) // 3_600_000 * 3_600_000] = float(r["fundingRate"])
+        json.dump({str(k): v for k, v in self.funding.items() if k > (now - timedelta(days=400)).timestamp() * 1000},
+                  open(self.FUND, "w"))
     self.updated = now
 
   def bars(self, minutes: int, include_live: bool = True) -> list[Bar]:

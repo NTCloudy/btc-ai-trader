@@ -18,27 +18,28 @@ def main(argv=None) -> int:
   from .data import Market
   from .ledger import Ledger
   from .service import Notifier, Publisher, build_state, weekly
+  from .ais import COINS
   ledger = Ledger(str(ROOT / "data" / "btc.db"))
-  market = Market()
+  markets = {s: Market(s) for s in COINS}
   notifier = None if a.no_line else Notifier(ledger)
   if a.cmd == "run":
     from .engine import Engine
-    Engine(ledger, market, None if a.no_publish else Publisher(ledger, market), notifier).run_forever()
-  elif a.cmd == "weekly":
-    market.update()
-    print("\n".join(weekly(ledger, market, notifier)))
+    Engine(ledger, markets, None if a.no_publish else Publisher(ledger, markets), notifier).run_forever()
+    return 0
+  for m in markets.values():
+    m.update()
+  if a.cmd == "weekly":
+    print("\n".join(weekly(ledger, markets, notifier)))
   elif a.cmd == "publish":
-    market.update()
-    Publisher(ledger, market).publish()
+    Publisher(ledger, markets).publish()
   else:
-    market.update()
-    st = build_state(ledger, market)
-    print(f"BTC {st['price']:,.0f}（24h {st['change_24h']:+.2%}）｜{'多頭' if st['regime'] == 'bull' else '空頭'}（200 日均線 {st['ma200d']:,.0f}）")
+    st = build_state(ledger, markets)
+    print("  ".join(f"{c['coin']} {c['price']:,.6g}（{(c['change_24h'] or 0):+.1%}）" for c in st["coins"]))
     for x in st["ais"]:
-      p = x["position"]
-      held = f"{'多' if p['side'] == 1 else '空'}單 {p['entry']:,.0f} 停損 {p['stop']:,.0f} 未實現 {p['unrealized']:+,.0f}" if p else "空手"
-      print(f"  {x['emoji']} {x['name']}：累計 {x['total']:+,.0f}｜{x['trades']} 筆｜{held}｜參數 {x['params']}")
-    print(f"  📦 買進持有：{st['bh']['value']:+,.0f}")
+      held = [f"{c['coin']} {'多' if c['position']['side'] == 1 else '空'} 未實現 {c['position']['unrealized']:+,.0f}"
+              for c in x["coins"] if c["position"]]
+      print(f"  {x['emoji']} {x['name']}：累計 {x['total']:+,.0f}｜{x['trades']} 筆｜{'、'.join(held) or '空手'}")
+    print(f"  📦 買進持有（6 幣）：{st['bh']['value']:+,.0f}")
   return 0
 
 

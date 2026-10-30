@@ -18,8 +18,8 @@ class Ledger:
     self.lock = threading.Lock()
     with self.lock:
       self.conn.executescript("""
-        CREATE TABLE IF NOT EXISTS trades(id INTEGER PRIMARY KEY, ai TEXT, side INTEGER, entry_t TEXT, entry REAL,
-          exit_t TEXT, exit REAL, pnl REAL, why TEXT, params TEXT, UNIQUE(ai, entry_t, side));
+        CREATE TABLE IF NOT EXISTS trades(id INTEGER PRIMARY KEY, ai TEXT, symbol TEXT, side INTEGER, entry_t TEXT,
+          entry REAL, exit_t TEXT, exit REAL, pnl REAL, why TEXT, params TEXT, UNIQUE(ai, symbol, entry_t, side));
         CREATE TABLE IF NOT EXISTS equity(ts TEXT, ai TEXT, value REAL);
         CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY, ts TEXT, ai TEXT, level TEXT, message TEXT);
         CREATE TABLE IF NOT EXISTS state(key TEXT PRIMARY KEY, value TEXT);
@@ -47,10 +47,11 @@ class Ledger:
     self.exec("INSERT INTO events(ts,ai,level,message) VALUES(?,?,?,?)",
               (datetime.now(UTC).isoformat(timespec="seconds"), ai, level, message))
 
-  def add_trade(self, ai: str, side: int, entry_t, entry: float, exit_t, exit_: float, pnl: float, why: str,
-                params: dict) -> bool:
-    cur = self.exec("INSERT OR IGNORE INTO trades(ai,side,entry_t,entry,exit_t,exit,pnl,why,params) VALUES(?,?,?,?,?,?,?,?,?)",
-                    (ai, side, entry_t.isoformat(), entry, exit_t.isoformat(), exit_, pnl, why, json.dumps(params)))
+  def add_trade(self, ai: str, symbol: str, side: int, entry_t, entry: float, exit_t, exit_: float, pnl: float,
+                why: str, params: dict) -> bool:
+    cur = self.exec("INSERT OR IGNORE INTO trades(ai,symbol,side,entry_t,entry,exit_t,exit,pnl,why,params) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (ai, symbol, side, entry_t.isoformat(), entry, exit_t.isoformat(), exit_, pnl, why, json.dumps(params)))
     return cur.rowcount == 1
 
   def realized(self, ai: str) -> float:

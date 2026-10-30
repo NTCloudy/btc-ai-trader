@@ -36,9 +36,9 @@ class Bar:
   v: float
 
 
-def load_1m(raw: Path = RAW) -> list[Bar]:
+def load_1m(raw: Path = RAW, symbol: str = "BTCUSDT") -> list[Bar]:
   rows: dict[int, Bar] = {}
-  for f in sorted(raw.glob("fut_BTCUSDT-1m-*.zip")):
+  for f in sorted(raw.glob(f"fut_{symbol}-1m-*.zip")):
     with zipfile.ZipFile(f) as z:
       for name in z.namelist():
         for r in csv.reader(io.TextIOWrapper(z.open(name), encoding="utf-8")):
@@ -52,10 +52,10 @@ def load_1m(raw: Path = RAW) -> list[Bar]:
   return [rows[k] for k in sorted(rows)]
 
 
-def load_funding(raw: Path = RAW) -> dict[int, float]:
+def load_funding(raw: Path = RAW, symbol: str = "BTCUSDT") -> dict[int, float]:
   """funding time (ms, rounded to the hour) -> rate"""
   out = {}
-  for f in sorted(raw.glob("BTCUSDT-fundingRate-*.zip")):
+  for f in sorted(raw.glob(f"{symbol}-fundingRate-*.zip")):
     with zipfile.ZipFile(f) as z:
       for name in z.namelist():
         for r in csv.reader(io.TextIOWrapper(z.open(name), encoding="utf-8")):

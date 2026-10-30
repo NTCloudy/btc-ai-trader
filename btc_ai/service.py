@@ -11,7 +11,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .ais import AIS, NOTIONAL
+from .ais import AIS, COIN_NAMES, COINS, NOTIONAL, notional
 from .engine import TPE, select_params
 from .sim import ema
 
@@ -21,41 +21,51 @@ REPO = "NTCloudy/btc-ai-trader"
 CRED = Path.home() / ".config" / "tw-futures-ai"
 
 
-def build_state(ledger, market) -> dict:
-  now = datetime.now(UTC)
-  d1 = market.bars(1440)
+def coin_info(m) -> dict:
+  d1 = m.bars(1440)
   closes = [b.c for b in d1]
   ma200 = ema(closes, 200)[-1] if len(closes) > 200 else None
-  h1 = market.bars(60)[-24 * 7:]
+  return {"symbol": m.symbol, "coin": COIN_NAMES[m.symbol], "price": m.price, "change_24h": m.change_24h(),
+          "funding_rate": m.last_rate, "ma200d": ma200,
+          "regime": None if ma200 is None or not m.price else ("bull" if m.price > ma200 else "bear"),
+          "spark": [[b.t.isoformat(), b.c] for b in m.bars(60)[-24 * 7:]]}
+
+
+def build_state(ledger, markets: dict) -> dict:
+  from .engine import Engine
+  now = datetime.now(UTC)
+  eng = Engine(ledger, markets)
   ais = []
   for ai in AIS:
-    era = ledger.get(f"era:{ai['id']}") or {}
-    pos = ledger.get(f"pos:{ai['id']}")
     trades = ledger.rows("SELECT * FROM trades WHERE ai=? ORDER BY id DESC", (ai["id"],))
+    coins = []
+    for sym in ai["coins"]:
+      era = ledger.get(f"era:{ai['id']}:{sym}") or {}
+      pos = ledger.get(f"pos:{ai['id']}:{sym}")
+      ct = [t for t in trades if t["symbol"] == sym]
+      coins.append({"symbol": sym, "coin": COIN_NAMES[sym], "params": era.get("params"), "since": era.get("since"),
+                    "stats": era.get("stats"), "reason": era.get("reason"), "position": pos,
+                    "realized": round(sum(t["pnl"] for t in ct), 2), "trades": len(ct)})
     realized = sum(t["pnl"] for t in trades)
+    unreal = sum((c["position"] or {}).get("unrealized", 0.0) for c in coins)
     eq = ledger.rows("SELECT ts, value FROM equity WHERE ai=? ORDER BY ts", (ai["id"],))
-    wins = sum(1 for t in trades if t["pnl"] > 0)
     ais.append({
         "id": ai["id"], "name": ai["name"], "emoji": ai["emoji"], "color": ai["color"], "title": ai["title"],
         "market": "現貨（只做多）" if ai["market"] == "spot" else "永續合約（多空）", "desc": ai["desc"],
-        "params": era.get("params"), "since": era.get("since"), "stats": era.get("stats"), "reason": era.get("reason"),
-        "position": pos, "realized": round(realized, 2),
-        "total": round(realized + (pos["unrealized"] if pos else 0.0), 2),
-        "trades": len(trades), "wins": wins, "recent": trades[:15],
+        "per_coin": round(notional(ai)), "coins": coins, "realized": round(realized, 2),
+        "total": round(realized + unreal, 2), "trades": len(trades), "wins": sum(1 for t in trades if t["pnl"] > 0),
+        "recent": [dict(t, coin=COIN_NAMES.get(t["symbol"], t["symbol"])) for t in trades[:15]],
         "equity": [[e["ts"], round(e["value"], 2)] for e in eq[::max(1, len(eq) // 400)]],
     })
   bh = ledger.get("bh")
   bh_eq = ledger.rows("SELECT ts, value FROM equity WHERE ai='bh' ORDER BY ts")
   return {
       "generated_at": now.isoformat(timespec="seconds"),
-      "price": market.price, "mark": market.mark, "change_24h": market.change_24h(),
-      "funding_rate": market.last_rate, "next_funding": market.next_funding.isoformat() if market.next_funding else None,
-      "ma200d": ma200, "regime": None if ma200 is None else ("bull" if market.price > ma200 else "bear"),
-      "spark": [[b.t.isoformat(), b.c] for b in h1],
+      "coins": [coin_info(markets[s]) for s in COINS if s in markets],
       "notional": NOTIONAL, "ais": ais,
-      "bh": {"since": bh["t"] if bh else None, "entry": bh["price"] if bh else None,
+      "bh": {"since": bh["t"] if bh else None,
              "equity": [[e["ts"], round(e["value"], 2)] for e in bh_eq[::max(1, len(bh_eq) // 400)]],
-             "value": round(bh_eq[-1]["value"], 2) if bh_eq else 0.0},
+             "value": round(eng.bh_value(), 2)},
       "learning": ledger.get("learning_log", [])[-12:],
       "events": ledger.rows("SELECT ts, ai, level, message FROM events ORDER BY id DESC LIMIT 40"),
   }
@@ -65,8 +75,8 @@ class Publisher:
   """Same approach as the futures project: amend one commit on the `live-state` branch and write a fresh
   slots/<epoch//60>.json each minute (raw.githubusercontent caches a path for ~5 minutes)."""
 
-  def __init__(self, ledger, market):
-    self.ledger, self.market = ledger, market
+  def __init__(self, ledger, markets):
+    self.ledger, self.markets = ledger, markets
     self.dir = ROOT / "data" / "publish"
 
   def _git(self, *args):
@@ -83,7 +93,7 @@ class Publisher:
       self._git("config", "user.name", "btc-ai-bot")
       self._git("config", "user.email", "bot@users.noreply.github.com")
       self._git("remote", "add", "origin", f"https://github.com/{REPO}.git")
-    body = json.dumps(build_state(self.ledger, self.market), ensure_ascii=False, default=str)
+    body = json.dumps(build_state(self.ledger, self.markets), ensure_ascii=False, default=str)
     slot = int(time.time() // 60)
     (self.dir / "slots").mkdir(exist_ok=True)
     (self.dir / "slots" / f"{slot}.json").write_text(body, encoding="utf-8")
@@ -123,44 +133,47 @@ class Notifier:
       return
     self.ledger.set("daily_sent", day)
     since = (datetime.now(UTC) - timedelta(days=1)).isoformat()
-    lines = [f"每日報告 {now:%m/%d}｜BTC {engine.market.price:,.0f}（24h {engine.market.change_24h() or 0:+.1%}）",
-             "AI｜過去 24h｜累計｜持倉"]
+    btc = engine.markets["BTCUSDT"]
+    lines = [f"每日報告 {now:%m/%d}｜BTC {btc.price:,.0f}（24h {btc.change_24h() or 0:+.1%}）", "AI｜過去 24h｜累計｜持倉"]
     for ai in AIS:
       d = sum(t["pnl"] for t in self.ledger.rows("SELECT pnl FROM trades WHERE ai=? AND exit_t>=?", (ai["id"], since)))
-      pos = self.ledger.get(f"pos:{ai['id']}")
-      tot = self.ledger.realized(ai["id"]) + (pos["unrealized"] if pos else 0)
-      held = f"{'多' if pos['side'] == 1 else '空'}單 {pos['entry']:,.0f}（{pos['unrealized']:+,.0f}）" if pos else "空手"
-      lines.append(f"{ai['emoji']} {ai['name']}｜{d:+,.0f}｜{tot:+,.0f}｜{held}")
-    lines.append(f"📦 買進持有｜–｜{engine.bh_value():+,.0f}｜持有")
-    lines.append("（單位 USDT，每位 AI 每筆 10,000 USDT 模擬）")
+      held = [COIN_NAMES[s] for s in ai["coins"] if self.ledger.get(f"pos:{ai['id']}:{s}")]
+      lines.append(f"{ai['emoji']} {ai['name']}｜{d:+,.0f}｜{engine.ai_total(ai):+,.0f}｜{'、'.join(held) or '空手'}")
+    lines.append(f"📦 買進持有｜–｜{engine.bh_value():+,.0f}｜6 幣平均")
+    lines.append("（USDT；每位 AI 總資金 10,000，平均分給負責的幣）")
     self.send("\n".join(lines))
 
 
-def weekly(ledger, market, notifier=None) -> list[str]:
-  """Weekly self-learning: re-select each AI's parameters from the trailing year; switch only if different."""
+def weekly(ledger, markets: dict, notifier=None) -> list[str]:
+  """Weekly self-learning: re-select each AI's parameters per coin from the trailing year; switch only if better."""
   from .engine import mark_to_market
   out = [f"每週自主學習 {datetime.now(TPE):%m/%d}"]
   log = ledger.get("learning_log", [])
   for ai in AIS:
-    era = ledger.get(f"era:{ai['id']}")
-    best, stats = select_params(ai, market)
-    if era and best == era["params"]:
-      out.append(f"{ai['emoji']} {ai['name']}：維持 {best}（近一年 {stats['pnl']:+,} USDT，勝 {stats['wins']}/{stats['trades']}）")
-      continue
-    pos = ledger.get(f"pos:{ai['id']}")
-    now = datetime.now(UTC)
-    if pos:  # Close the previous era's position at the current price before switching.
-      p = dict(pos, t=datetime.fromisoformat(pos["t"]))
-      pnl = mark_to_market(ai, p, market.price)
-      ledger.add_trade(ai["id"], pos["side"], p["t"], pos["entry"], now, market.price, pnl, "每週調整參數", era["params"])
-      ledger.set(f"pos:{ai['id']}", None)
-    ledger.set(f"era:{ai['id']}", {"since": now.isoformat(timespec="seconds"), "params": best, "stats": stats,
-                                   "reason": "每週調整"})
-    out.append(f"{ai['emoji']} {ai['name']}：✅ 改為 {best}（近一年 {stats['pnl']:+,} USDT，勝 {stats['wins']}/{stats['trades']}）")
-    log.append({"ts": now.isoformat(timespec="seconds"), "ai": ai["name"], "from": era and era["params"], "to": best,
-                "stats": stats})
-    ledger.log(f"{ai['name']} 每週調整參數 → {best}", ai["id"], "LEARN")
-  ledger.set("learning_log", log[-50:])
+    changed, kept = [], []
+    for sym in ai["coins"]:
+      m = markets[sym]
+      key = f"era:{ai['id']}:{sym}"
+      era = ledger.get(key)
+      best, stats = select_params(ai, m)
+      if era and best == era["params"]:
+        kept.append(COIN_NAMES[sym])
+        continue
+      now = datetime.now(UTC)
+      pos = ledger.get(f"pos:{ai['id']}:{sym}")
+      if pos and era:  # Close the previous era's position at the current price before switching.
+        p = dict(pos, t=datetime.fromisoformat(pos["t"]))
+        ledger.add_trade(ai["id"], sym, pos["side"], p["t"], pos["entry"], now, m.price, mark_to_market(ai, p, m.price),
+                         "每週調整參數", era["params"])
+        ledger.set(f"pos:{ai['id']}:{sym}", None)
+      ledger.set(key, {"since": now.isoformat(timespec="seconds"), "params": best, "stats": stats, "reason": "每週調整"})
+      changed.append(f"{COIN_NAMES[sym]}（近一年 {stats['pnl']:+,}）")
+      log.append({"ts": now.isoformat(timespec="seconds"), "ai": f"{ai['name']}／{COIN_NAMES[sym]}",
+                  "from": era and era["params"], "to": best, "stats": stats})
+      ledger.log(f"{ai['name']}／{COIN_NAMES[sym]} 每週調整參數 → {best}", ai["id"], "LEARN")
+    out.append(f"{ai['emoji']} {ai['name']}：" + (f"調整 {'、'.join(changed)}" if changed else "全部維持")
+               + (f"；維持 {'、'.join(kept)}" if changed and kept else ""))
+  ledger.set("learning_log", log[-60:])
   if notifier:
     notifier.send("\n".join(out))
   return out

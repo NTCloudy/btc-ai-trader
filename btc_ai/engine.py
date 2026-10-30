@@ -1,9 +1,9 @@
-"""Live paper-trading engine.
+"""Live paper-trading engine (multi-coin).
 
-Each loop: refresh market data, run every AI's strategy over its timeframe bars (the last bar may be the
-in-progress one, so stops react within the bar while entries only use closed bars), record new closed
-trades of the current "era" (parameters in force since the last weekly re-tune), mark the open position,
-snapshot equity, publish the dashboard state and send LINE notices.
+Each loop: refresh market data for every coin, run every AI's strategy on each of its coins (the last bar may
+be the in-progress one, so stops react within the bar while entries only use closed bars), record new closed
+trades of the current "era" (parameters in force since the last weekly re-tune of that AI/coin), mark open
+positions, snapshot equity, publish the dashboard state and send LINE notices.
 
 Because the live engine runs the exact backtest code on the live bars, live and backtest results match by
 construction; differences can only come from data (live klines vs archive) or timing.
@@ -11,12 +11,11 @@ construction; differences can only come from data (live klines vs archive) or ti
 
 from __future__ import annotations
 
-import json
 import time
 import traceback
 from datetime import datetime, timedelta, timezone
 
-from .ais import AIS, NOTIONAL, run
+from .ais import AIS, COIN_NAMES, COINS, NOTIONAL, run
 from .sim import FEES
 
 UTC = timezone.utc
@@ -52,68 +51,86 @@ def mark_to_market(ai: dict, pos: dict, price: float) -> float:
 
 class Engine:
 
-  def __init__(self, ledger, market, publisher=None, notifier=None, loop_seconds: int = 30):
-    self.ledger, self.market, self.publisher, self.notifier = ledger, market, publisher, notifier
+  def __init__(self, ledger, markets: dict, publisher=None, notifier=None, loop_seconds: int = 30):
+    self.ledger, self.markets, self.publisher, self.notifier = ledger, markets, publisher, notifier
     self.loop_seconds = loop_seconds
     self.last_equity = 0.0
     self.last_publish = 0.0
 
-  def era(self, ai: dict) -> dict:
-    e = self.ledger.get(f"era:{ai['id']}")
+  def era(self, ai: dict, sym: str) -> dict:
+    key = f"era:{ai['id']}:{sym}"
+    e = self.ledger.get(key)
     if e is None:
-      params, stats = select_params(ai, self.market)
+      params, stats = select_params(ai, self.markets[sym])
       e = {"since": datetime.now(UTC).isoformat(timespec="seconds"), "params": params, "stats": stats, "reason": "上線"}
-      self.ledger.set(f"era:{ai['id']}", e)
-      self.ledger.log(f"{ai['name']} 上線，參數 {params}（近一年回測 {stats['pnl']:+,} USDT）", ai["id"])
+      self.ledger.set(key, e)
+      self.ledger.log(f"{ai['name']}／{COIN_NAMES[sym]} 上線，參數 {params}（近一年回測 {stats['pnl']:+,} USDT）", ai["id"])
     return e
 
   def step(self) -> None:
-    m = self.market
-    m.update()
+    for sym, m in self.markets.items():
+      try:
+        m.update()
+      except Exception as exc:
+        self.ledger.log(f"{COIN_NAMES[sym]} 行情更新失敗：{exc}", level="ERROR")
     now = datetime.now(UTC)
-    if self.ledger.get("bh") is None:  # Buy-and-hold benchmark starts with the engine.
-      self.ledger.set("bh", {"t": now.isoformat(timespec="seconds"), "price": m.price})
+    if self.ledger.get("bh") is None:  # Buy-and-hold basket (all coins, equal weight) starts with the engine.
+      self.ledger.set("bh", {"t": now.isoformat(timespec="seconds"),
+                             "prices": {s: m.price for s, m in self.markets.items() if m.price}})
     for ai in AIS:
-      e = self.era(ai)
-      since = datetime.fromisoformat(e["since"])
-      r = run(ai, m.bars(ai["tf"]), e["params"], m.funding)
-      for (et, xt, side, ep, xp, net, why) in r.log:
-        if et >= since and self.ledger.add_trade(ai["id"], side, et, ep, xt, xp, net, why, e["params"]):
-          msg = f"🏁 {ai['name']} 平倉｜{'多' if side == 1 else '空'}單 {ep:,.0f} → {xp:,.0f}｜{net:+,.0f} USDT（{why}）"
-          self.ledger.log(msg, ai["id"], "TRADE")
-          if self.notifier:
-            self.notifier.send(msg)
-      pos = r.open_pos if r.open_pos and r.open_pos["t"] >= since else None
-      prev = self.ledger.get(f"pos:{ai['id']}")
-      if pos:
-        info = {"side": pos["side"], "entry": pos["entry"], "t": pos["t"].isoformat(), "stop": pos["stop"],
-                "tp": pos["tp"], "qty": pos["qty"], "fee_in": pos["fee_in"], "funding": pos.get("funding", 0.0),
-                "unrealized": round(mark_to_market(ai, pos, m.price), 2)}
-        if not prev or prev.get("t") != info["t"]:
-          msg = (f"✅ {ai['name']} 進場｜{'做多' if pos['side'] == 1 else '放空'} {pos['entry']:,.0f}｜"
-                 f"停損 {pos['stop']:,.0f}" + (f"｜停利 {pos['tp']:,.0f}" if pos["tp"] else "｜移動停損"))
-          self.ledger.log(msg, ai["id"], "TRADE")
-          if self.notifier:
-            self.notifier.send(msg)
-        self.ledger.set(f"pos:{ai['id']}", info)
-      elif prev:
-        self.ledger.set(f"pos:{ai['id']}", None)
+      for sym in ai["coins"]:
+        m = self.markets[sym]
+        if not m.price:
+          continue
+        coin = COIN_NAMES[sym]
+        e = self.era(ai, sym)
+        since = datetime.fromisoformat(e["since"])
+        r = run(ai, m.bars(ai["tf"]), e["params"], m.funding)
+        for (et, xt, side, ep, xp, net, why) in r.log:
+          if et >= since and self.ledger.add_trade(ai["id"], sym, side, et, ep, xt, xp, net, why, e["params"]):
+            msg = f"🏁 {ai['name']}／{coin} 平倉｜{'多' if side == 1 else '空'}單 {ep:,.6g} → {xp:,.6g}｜{net:+,.0f} USDT（{why}）"
+            self.ledger.log(msg, ai["id"], "TRADE")
+            if self.notifier:
+              self.notifier.send(msg)
+        pos = r.open_pos if r.open_pos and r.open_pos["t"] >= since else None
+        key = f"pos:{ai['id']}:{sym}"
+        prev = self.ledger.get(key)
+        if pos:
+          info = {"side": pos["side"], "entry": pos["entry"], "t": pos["t"].isoformat(), "stop": pos["stop"],
+                  "tp": pos["tp"], "qty": pos["qty"], "fee_in": pos["fee_in"], "funding": pos.get("funding", 0.0),
+                  "price": m.price, "unrealized": round(mark_to_market(ai, pos, m.price), 2)}
+          if not prev or prev.get("t") != info["t"]:
+            msg = (f"✅ {ai['name']}／{coin} 進場｜{'做多' if pos['side'] == 1 else '放空'} {pos['entry']:,.6g}｜"
+                   f"停損 {pos['stop']:,.6g}" + (f"｜停利 {pos['tp']:,.6g}" if pos["tp"] else "｜移動停損"))
+            self.ledger.log(msg, ai["id"], "TRADE")
+            if self.notifier:
+              self.notifier.send(msg)
+          self.ledger.set(key, info)
+        elif prev:
+          self.ledger.set(key, None)
     if time.monotonic() - self.last_equity >= 300:
       self.last_equity = time.monotonic()
       ts = now.isoformat(timespec="seconds")
       for ai in AIS:
-        p = self.ledger.get(f"pos:{ai['id']}")
-        self.ledger.exec("INSERT INTO equity(ts,ai,value) VALUES(?,?,?)",
-                         (ts, ai["id"], self.ledger.realized(ai["id"]) + (p["unrealized"] if p else 0.0)))
+        self.ledger.exec("INSERT INTO equity(ts,ai,value) VALUES(?,?,?)", (ts, ai["id"], self.ai_total(ai)))
       self.ledger.exec("INSERT INTO equity(ts,ai,value) VALUES(?,?,?)", (ts, "bh", self.bh_value()))
 
+  def ai_total(self, ai: dict) -> float:
+    unreal = sum((self.ledger.get(f"pos:{ai['id']}:{s}") or {}).get("unrealized", 0.0) for s in ai["coins"])
+    return self.ledger.realized(ai["id"]) + unreal
+
   def bh_value(self) -> float:
+    """Equal-weight basket of all coins, NOTIONAL in total, spot fees in and out."""
     bh = self.ledger.get("bh")
-    if not bh or not self.market.price:
+    if not bh:
       return 0.0
-    qty = NOTIONAL / bh["price"]
-    fee = FEES["spot"]["taker"]
-    return qty * self.market.price - NOTIONAL - NOTIONAL * fee - qty * self.market.price * fee
+    fee, each, total = FEES["spot"]["taker"], NOTIONAL / len(COINS), 0.0
+    for s in COINS:
+      p0, p = bh["prices"].get(s), self.markets[s].price if s in self.markets else None
+      if p0 and p:
+        qty = each / p0
+        total += qty * p - each - each * fee - qty * p * fee
+    return total
 
   def run_forever(self) -> None:
     self.ledger.log("引擎啟動")
