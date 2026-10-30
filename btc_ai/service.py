@@ -18,6 +18,7 @@ from .sim import ema
 ROOT = Path(__file__).resolve().parents[1]
 UTC = timezone.utc
 REPO = "NTCloudy/btc-ai-trader"
+UI_VERSION = 2  # Bump together with UI in docs/index.html whenever the state format changes.
 CRED = Path.home() / ".config" / "tw-futures-ai"
 
 
@@ -60,6 +61,7 @@ def build_state(ledger, markets: dict) -> dict:
   bh = ledger.get("bh")
   bh_eq = ledger.rows("SELECT ts, value FROM equity WHERE ai='bh' ORDER BY ts")
   return {
+      "ui": UI_VERSION,  # The page reloads itself when its own version differs (stale cached page).
       "generated_at": now.isoformat(timespec="seconds"),
       "coins": [coin_info(markets[s]) for s in COINS if s in markets],
       "notional": NOTIONAL, "ais": ais,

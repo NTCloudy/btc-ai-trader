@@ -118,6 +118,7 @@
 </div>
 <script>
 const RAW = 'https://raw.githubusercontent.com/NTCloudy/btc-ai-trader/live-state';
+const UI = 2;  // Must match UI_VERSION in btc_ai/service.py.
 const LOCAL = location.search.includes('local');
 const fmt = (n, d = 0) => (n ?? 0).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
 const usd = n => (n >= 0 ? '+' : '−') + fmt(Math.abs(n));
@@ -226,7 +227,12 @@ function render(s) {
   document.getElementById('events').innerHTML = s.events.map(e => `<li><small>${tw(e.ts)}</small>${e.message}</li>`).join('');
 }
 
-async function tick() { try { window.LAST = await load(); render(window.LAST); } catch (e) { document.getElementById('upd').textContent = '讀取失敗：' + e.message; } }
+async function tick() { try {
+    window.LAST = await load();
+    if (window.LAST.ui && window.LAST.ui !== UI && !sessionStorage.getItem('reloaded')) {  // Stale cached page.
+      sessionStorage.setItem('reloaded', '1'); location.replace(location.pathname + '?v=' + Date.now()); return;
+    }
+    render(window.LAST); } catch (e) { document.getElementById('upd').textContent = '讀取失敗：' + e.message; } }
 tick(); setInterval(tick, 30000);
 </script>
 </body>
