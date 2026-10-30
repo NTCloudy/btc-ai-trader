@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>₿ BTC AI Trader</title>
+<style>
+  :root { --bg:#070a12; --panel:rgba(20,26,42,.72); --line:rgba(247,147,26,.18); --text:#eef2ff; --mute:#8b93ad;
+          --btc:#f7931a; --up:#ff4d6d; --down:#2ee59d; --glass:blur(14px); }
+  * { box-sizing:border-box; }
+  body { margin:0; color:var(--text); font-family:-apple-system,BlinkMacSystemFont,"PingFang TC","Noto Sans TC",sans-serif;
+         background: radial-gradient(1200px 600px at 85% -10%, rgba(247,147,26,.18), transparent 60%),
+                     radial-gradient(900px 500px at -10% 20%, rgba(124,58,237,.14), transparent 60%), var(--bg); min-height:100vh; }
+  .num { font-variant-numeric: tabular-nums; font-family: "SF Mono", ui-monospace, Menlo, monospace; }
+  .wrap { max-width:1280px; margin:0 auto; padding:22px 18px 60px; }
+  header { display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap; }
+  .brand { display:flex; align-items:center; gap:12px; }
+  .coin { width:46px; height:46px; border-radius:50%; background:conic-gradient(from 200deg,#ffb347,#f7931a,#c96d00,#f7931a);
+          display:grid; place-items:center; font-size:26px; font-weight:800; color:#1a1000; box-shadow:0 0 30px rgba(247,147,26,.45); }
+  .brand h1 { margin:0; font-size:22px; letter-spacing:.5px; }
+  .brand small { color:var(--mute); }
+  .live { display:flex; align-items:center; gap:8px; color:var(--mute); font-size:13px; }
+  .dot { width:9px; height:9px; border-radius:50%; background:var(--down); box-shadow:0 0 10px var(--down); animation:pulse 1.6s infinite; }
+  @keyframes pulse { 50% { opacity:.35; } }
+  .card { background:var(--panel); backdrop-filter:var(--glass); border:1px solid var(--line); border-radius:18px; padding:18px; }
+  .hero { display:grid; grid-template-columns: 1.1fr 1.9fr; gap:16px; margin-top:18px; }
+  .price { font-size:46px; font-weight:800; color:var(--btc); line-height:1.1; }
+  .chips { display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; }
+  .chip { border:1px solid var(--line); border-radius:999px; padding:5px 11px; font-size:13px; color:var(--mute); }
+  .chip b { color:var(--text); }
+  .up { color:var(--up); } .down { color:var(--down); } .mute { color:var(--mute); }
+  h2 { font-size:15px; margin:0 0 12px; color:#cfd6f3; letter-spacing:.4px; }
+  .grid4 { display:grid; grid-template-columns: repeat(4, 1fr); gap:14px; margin-top:16px; }
+  .rank { position:relative; overflow:hidden; }
+  .rank .badge { position:absolute; top:12px; right:14px; font-size:22px; }
+  .rank .who { display:flex; align-items:center; gap:10px; }
+  .avatar { width:38px; height:38px; border-radius:12px; display:grid; place-items:center; font-size:20px; }
+  .rank .val { font-size:28px; font-weight:800; margin-top:10px; }
+  .bar { height:4px; border-radius:4px; margin-top:12px; opacity:.85; }
+  svg { width:100%; display:block; }
+  .ais { display:grid; grid-template-columns: repeat(3, 1fr); gap:14px; margin-top:16px; }
+  .ai h3 { margin:0; font-size:18px; display:flex; align-items:center; gap:8px; }
+  .tag { font-size:11px; border-radius:6px; padding:2px 7px; border:1px solid var(--line); color:var(--mute); }
+  .desc { color:var(--mute); font-size:13px; line-height:1.55; margin:8px 0 12px; }
+  .kv { display:grid; grid-template-columns: repeat(3, 1fr); gap:8px; }
+  .kv div { background:rgba(255,255,255,.03); border-radius:10px; padding:8px 10px; }
+  .kv small { display:block; color:var(--mute); font-size:11px; }
+  .kv b { font-size:16px; }
+  .pos { margin-top:12px; border-radius:12px; padding:10px 12px; font-size:13px; }
+  .pos.long { background:rgba(255,77,109,.10); border:1px solid rgba(255,77,109,.35); }
+  .pos.short { background:rgba(46,229,157,.08); border:1px solid rgba(46,229,157,.3); }
+  .pos.flat { background:rgba(255,255,255,.03); border:1px dashed rgba(255,255,255,.12); color:var(--mute); }
+  table { width:100%; border-collapse:collapse; font-size:12.5px; }
+  th, td { padding:6px 6px; border-bottom:1px solid rgba(255,255,255,.06); text-align:left; white-space:nowrap; }
+  th { color:var(--mute); font-weight:500; }
+  .two { display:grid; grid-template-columns: 1fr 1fr; gap:14px; margin-top:16px; }
+  .tl { list-style:none; margin:0; padding:0; max-height:300px; overflow:auto; }
+  .tl li { padding:8px 0; border-bottom:1px solid rgba(255,255,255,.06); font-size:13px; }
+  .tl small { color:var(--mute); margin-right:6px; }
+  .legend { display:flex; gap:14px; flex-wrap:wrap; font-size:12px; color:var(--mute); margin-top:8px; }
+  .legend i { display:inline-block; width:14px; height:3px; border-radius:3px; margin-right:5px; vertical-align:middle; }
+  .tip { position:absolute; pointer-events:none; background:#0f1424ee; border:1px solid var(--line); border-radius:10px;
+         padding:8px 10px; font-size:12px; display:none; white-space:nowrap; }
+  footer { color:var(--mute); font-size:12px; margin-top:22px; line-height:1.7; }
+  @media (max-width: 980px) { .hero, .two { grid-template-columns: 1fr; } .grid4 { grid-template-columns: repeat(2, 1fr); }
+                              .ais { grid-template-columns: 1fr; } .price { font-size:38px; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand"><div class="coin">₿</div><div><h1>BTC AI Trader</h1><small>三位會自主學習的比特幣 AI ・ 模擬交易</small></div></div>
+    <div class="live"><span class="dot"></span><span id="upd">連線中…</span></div>
+  </header>
+
+  <section class="hero">
+    <div class="card">
+      <div class="mute" style="font-size:13px">BTC / USDT 永續合約（幣安）</div>
+      <div class="price num" id="price">—</div>
+      <div id="chg" class="num" style="font-size:16px;margin-top:4px">—</div>
+      <div class="chips" id="chips"></div>
+    </div>
+    <div class="card" style="position:relative">
+      <h2>近 7 天走勢</h2>
+      <svg id="spark" viewBox="0 0 800 170" preserveAspectRatio="none" style="height:170px"></svg>
+    </div>
+  </section>
+
+  <section class="grid4" id="board"></section>
+
+  <section class="card" style="margin-top:16px;position:relative">
+    <h2>📈 累計損益走勢（上線起，USDT）</h2>
+    <svg id="eq" viewBox="0 0 1000 260" style="height:auto;aspect-ratio:1000/260"></svg>
+    <div class="tip" id="tip"></div>
+    <div class="legend" id="legend"></div>
+  </section>
+
+  <section class="ais" id="ais"></section>
+
+  <section class="two">
+    <div class="card"><h2>🧠 自主學習紀錄（每週用最近一年資料重新挑參數）</h2><ul class="tl" id="learn"></ul></div>
+    <div class="card"><h2>📜 動態</h2><ul class="tl" id="events"></ul></div>
+  </section>
+
+  <footer>
+    每位 AI 每筆以 10,000 USDT 模擬，已扣交易所手續費（現貨 0.1%、合約 0.05%）與資金費率。「買進持有」是同時間投入 10,000 USDT 一直抱著的比較基準。<br>
+    顏色採台灣慣例：紅色＝賺錢、綠色＝虧錢。過去績效不代表未來，目前全部為模擬，未連接真實帳戶。
+  </footer>
+</div>
+<script>
+const RAW = 'https://raw.githubusercontent.com/NTCloudy/btc-ai-trader/live-state';
+const LOCAL = location.search.includes('local');
+const fmt = (n, d = 0) => (n ?? 0).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
+const usd = n => (n >= 0 ? '+' : '−') + fmt(Math.abs(n));
+const cls = n => n > 0 ? 'up' : n < 0 ? 'down' : '';
+const tw = iso => new Date(iso).toLocaleString('zh-TW', { timeZone: 'Asia/Taipei', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });
+
+async function load() {
+  if (LOCAL) return (await fetch('state.json', { cache: 'no-store' })).json();
+  const slot = Math.floor(Date.now() / 60000);
+  for (let k = 0; k < 6; k++) {
+    try { const r = await fetch(`${RAW}/slots/${slot - k}.json`, { cache: 'no-store' }); if (r.ok) return r.json(); } catch (e) {}
+  }
+  return (await fetch(`${RAW}/state.json`, { cache: 'no-store' })).json();
+}
+
+function spark(pts) {
+  const el = document.getElementById('spark');
+  if (!pts.length) return;
+  const v = pts.map(p => p[1]), lo = Math.min(...v), hi = Math.max(...v);
+  const x = i => i / (pts.length - 1) * 800, y = p => 160 - (p - lo) / ((hi - lo) || 1) * 145;
+  const d = v.map((p, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(p).toFixed(1)}`).join(' ');
+  el.innerHTML = `<defs><linearGradient id="g" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#f7931a" stop-opacity=".45"/><stop offset="1" stop-color="#f7931a" stop-opacity="0"/></linearGradient></defs>
+    <path d="${d} L800,170 L0,170 Z" fill="url(#g)"/><path d="${d}" fill="none" stroke="#f7931a" stroke-width="2.2"/>
+    <text x="6" y="14" fill="#8b93ad" font-size="12">${fmt(hi)}</text><text x="6" y="166" fill="#8b93ad" font-size="12">${fmt(lo)}</text>`;
+}
+
+function equity(s) {
+  const el = document.getElementById('eq'), tip = document.getElementById('tip');
+  const series = s.ais.map(a => ({ name: `${a.emoji} ${a.name}`, color: a.color, pts: a.equity, dash: '' }))
+    .concat([{ name: '📦 買進持有', color: '#9aa3bd', pts: s.bh.equity, dash: '6 5' }]).filter(z => z.pts.length);
+  if (!series.length) { el.innerHTML = '<text x="20" y="130" fill="#8b93ad">上線後每 5 分鐘記錄一次</text>'; return; }
+  const all = series.flatMap(z => z.pts), ts = all.map(p => +new Date(p[0])), vs = all.map(p => p[1]);
+  const t0 = Math.min(...ts), t1 = Math.max(...ts), lo = Math.min(0, ...vs), hi = Math.max(0, ...vs);
+  const L = 60, R = 990, T = 12, B = 230;
+  const x = t => L + (t - t0) / ((t1 - t0) || 1) * (R - L), y = v => B - (v - lo) / ((hi - lo) || 1) * (B - T);
+  let svg = `<line x1="${L}" x2="${R}" y1="${y(0)}" y2="${y(0)}" stroke="#334" stroke-dasharray="4"/>`;
+  [hi, lo].forEach(v => svg += `<text x="${L - 8}" y="${y(v) + 4}" fill="#8b93ad" font-size="12" text-anchor="end">${fmt(v)}</text>`);
+  for (let k = 0; k <= 4; k++) { const t = t0 + (t1 - t0) * k / 4; svg += `<text x="${x(t)}" y="252" fill="#8b93ad" font-size="12" text-anchor="middle">${tw(new Date(t).toISOString())}</text>`; }
+  series.forEach(z => {
+    const d = z.pts.map((p, i) => `${i ? 'L' : 'M'}${x(+new Date(p[0])).toFixed(1)},${y(p[1]).toFixed(1)}`).join(' ');
+    const last = z.pts.at(-1);
+    svg += `<path d="${d}" fill="none" stroke="${z.color}" stroke-width="2.2" stroke-dasharray="${z.dash}"/><circle cx="${x(+new Date(last[0]))}" cy="${y(last[1])}" r="4" fill="${z.color}"/>`;
+  });
+  svg += `<line id="cx" x1="0" x2="0" y1="${T}" y2="${B}" stroke="#cbd5e1" visibility="hidden"/>`;
+  el.innerHTML = svg;
+  document.getElementById('legend').innerHTML = series.map(z => `<span><i style="background:${z.color}"></i>${z.name}</span>`).join('');
+  el.onpointermove = ev => {
+    const r = el.getBoundingClientRect(), vx = (ev.clientX - r.left) / r.width * 1000;
+    if (vx < L || vx > R) { el.onpointerleave(); return; }
+    const t = t0 + (vx - L) / (R - L) * (t1 - t0);
+    const rows = series.map(z => { let b = null; for (const p of z.pts) if (+new Date(p[0]) <= t) b = p; return b ? `<div><span style="color:${z.color}">●</span> ${z.name}：<b class="${cls(b[1])}">${usd(b[1])}</b></div>` : ''; }).join('');
+    const c = document.getElementById('cx'); c.setAttribute('x1', vx); c.setAttribute('x2', vx); c.setAttribute('visibility', 'visible');
+    tip.innerHTML = `<b>${tw(new Date(t).toISOString())}</b>${rows}`; tip.style.display = 'block';
+    const px = ev.clientX - r.left; tip.style.left = (px > r.width / 2 ? px - tip.offsetWidth - 10 : px + 30) + 'px'; tip.style.top = '40px';
+  };
+  el.onpointerleave = () => { tip.style.display = 'none'; document.getElementById('cx')?.setAttribute('visibility', 'hidden'); };
+}
+
+function render(s) {
+  document.getElementById('upd').textContent = `更新 ${tw(s.generated_at)}`;
+  document.getElementById('price').textContent = '$' + fmt(s.price, 1);
+  const ch = s.change_24h ?? 0;
+  document.getElementById('chg').innerHTML = `<span class="${cls(ch)}">${ch >= 0 ? '▲' : '▼'} ${(ch * 100).toFixed(2)}%</span> <span class="mute">24 小時</span>`;
+  const reg = s.regime === 'bull' ? '<b class="up">多頭</b>' : '<b class="down">空頭</b>';
+  document.getElementById('chips').innerHTML =
+    `<span class="chip">趨勢 ${reg}（200 日均線 <b class="num">${fmt(s.ma200d)}</b>）</span>` +
+    `<span class="chip">資金費率 <b class="num">${((s.funding_rate ?? 0) * 100).toFixed(4)}%</b>／8h</span>` +
+    `<span class="chip">下次結算 <b>${s.next_funding ? tw(s.next_funding).slice(-5) : '—'}</b></span>`;
+  spark(s.spark);
+
+  const rows = s.ais.map(a => ({ name: a.name, emoji: a.emoji, color: a.color, sub: a.title, v: a.total }))
+    .concat([{ name: '買進持有', emoji: '📦', color: '#9aa3bd', sub: '比較基準', v: s.bh.value }]).sort((a, b) => b.v - a.v);
+  const medal = ['🥇', '🥈', '🥉', ''];
+  document.getElementById('board').innerHTML = rows.map((r, i) => `<div class="card rank"><span class="badge">${medal[i]}</span>
+    <div class="who"><div class="avatar" style="background:${r.color}22;border:1px solid ${r.color}66">${r.emoji}</div><div><b>${r.name}</b><div class="mute" style="font-size:12px">${r.sub}</div></div></div>
+    <div class="val num ${cls(r.v)}">${usd(r.v)}</div><div class="mute" style="font-size:12px">USDT ・ ${(r.v / s.notional * 100).toFixed(2)}%</div>
+    <div class="bar" style="background:linear-gradient(90deg,${r.color},transparent)"></div></div>`).join('');
+
+  equity(s);
+
+  document.getElementById('ais').innerHTML = s.ais.map(a => {
+    const p = a.position;
+    const pos = p ? `<div class="pos ${p.side === 1 ? 'long' : 'short'}"><b>${p.side === 1 ? '🟥 持有多單' : '🟩 持有空單'}</b>
+        <span class="num">｜進場 ${fmt(p.entry)}｜停損 ${fmt(p.stop)}${p.tp ? '｜停利 ' + fmt(p.tp) : '（移動停損）'}</span><br>
+        <span class="mute">${tw(p.t)} 進場</span>　未實現 <b class="num ${cls(p.unrealized)}">${usd(p.unrealized)}</b></div>`
+      : '<div class="pos flat">空手，等待訊號</div>';
+    const wr = a.trades ? Math.round(a.wins / a.trades * 100) + '%' : '—';
+    const st = a.stats ? `近一年回測 ${usd(a.stats.pnl)}（${a.stats.trades} 筆）` : '';
+    const recent = a.recent.length ? `<table><tr><th>進場</th><th>方向</th><th>價格</th><th>出場</th><th>損益</th></tr>${a.recent.slice(0, 6).map(t =>
+        `<tr><td>${tw(t.entry_t)}</td><td class="${t.side === 1 ? 'up' : 'down'}">${t.side === 1 ? '多' : '空'}</td><td class="num">${fmt(t.entry)} → ${fmt(t.exit)}</td><td>${tw(t.exit_t)}</td><td class="num ${cls(t.pnl)}">${usd(t.pnl)}</td></tr>`).join('')}</table>`
+      : '<div class="mute" style="font-size:12px;margin-top:10px">上線後尚無平倉交易</div>';
+    return `<div class="card ai" style="border-top:3px solid ${a.color}"><h3>${a.emoji} ${a.name} <span class="tag">${a.title}</span> <span class="tag">${a.market}</span></h3>
+      <div class="desc">${a.desc}</div>
+      <div class="kv"><div><small>累計損益</small><b class="num ${cls(a.total)}">${usd(a.total)}</b></div><div><small>已平倉</small><b class="num">${a.trades} 筆</b></div><div><small>勝率</small><b class="num">${wr}</b></div></div>
+      ${pos}
+      <div class="mute" style="font-size:12px;margin:10px 0 6px">目前參數：<span class="num">${JSON.stringify(a.params || {}).replace(/[{}"]/g, '').replace(/,/g, '，')}</span><br>${a.reason || ''} ${a.since ? tw(a.since) : ''}　${st}</div>
+      ${recent}</div>`;
+  }).join('');
+
+  document.getElementById('learn').innerHTML = (s.learning.length ? s.learning.slice().reverse().map(l =>
+    `<li><small>${tw(l.ts)}</small><b>${l.ai}</b> 參數調整 → <span class="num">${JSON.stringify(l.to).replace(/[{}"]/g, '')}</span>（近一年 ${usd(l.stats.pnl)}）</li>`).join('')
+    : '<li class="mute">每週六 10:00 自動檢討一次；參數有更好的才換</li>');
+  document.getElementById('events').innerHTML = s.events.map(e => `<li><small>${tw(e.ts)}</small>${e.message}</li>`).join('');
+}
+
+async function tick() { try { render(await load()); } catch (e) { document.getElementById('upd').textContent = '讀取失敗：' + e.message; } }
+tick(); setInterval(tick, 30000);
+</script>
+</body>
+</html>
