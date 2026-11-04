@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import pickle
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -63,7 +64,10 @@ class Market:
           t = datetime.fromisoformat(r[0])
           rows[t] = Bar(t, *map(float, r[1:6]))
     if self.FUND.exists():
-      self.funding.update({int(k): v for k, v in json.load(open(self.FUND)).items()})
+      try:
+        self.funding.update({int(k): v for k, v in json.load(open(self.FUND)).items()})
+      except (ValueError, OSError):  # Empty / truncated cache: ignore, it is re-downloaded.
+        pass
     self.h1 = [rows[k] for k in sorted(rows)]
     if self.h1 and self.h1[-1].t >= datetime.now(UTC).replace(minute=0, second=0, microsecond=0):
       self.h1.pop()  # Never keep an unfinished hour in the closed list.
@@ -104,8 +108,10 @@ class Market:
       if fr:
         for r in fr:
           self.funding[int(r["fundingTime"]) // 3_600_000 * 3_600_000] = float(r["fundingRate"])
-        json.dump({str(k): v for k, v in self.funding.items() if k > (now - timedelta(days=400)).timestamp() * 1000},
-                  open(self.FUND, "w"))
+        tmp = self.FUND.with_suffix(".tmp")  # Atomic write: a crash mid-write cannot leave an empty file.
+        with open(tmp, "w") as f:
+          json.dump({str(k): v for k, v in self.funding.items() if k > (now - timedelta(days=400)).timestamp() * 1000}, f)
+        os.replace(tmp, self.FUND)
     self.updated = now
 
   def bars(self, minutes: int, include_live: bool = True) -> list[Bar]:
