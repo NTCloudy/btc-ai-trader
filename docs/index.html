@@ -232,7 +232,12 @@ async function tick() { try {
     if (window.LAST.ui && window.LAST.ui !== UI && !sessionStorage.getItem('reloaded')) {  // Stale cached page.
       sessionStorage.setItem('reloaded', '1'); location.replace(location.pathname + '?v=' + Date.now()); return;
     }
-    render(window.LAST); } catch (e) { document.getElementById('upd').textContent = '讀取失敗：' + e.message; } }
+    render(window.LAST);
+  } catch (e) {
+    document.getElementById('upd').textContent = window.LAST
+      ? `更新 ${tw(window.LAST.generated_at)}（網路重連中…）`
+      : '連線中，稍候自動重試…';
+  } }
 tick(); setInterval(tick, 30000);
 </script>
 </body>

@@ -72,7 +72,7 @@ class Engine:
       try:
         m.update()
       except Exception as exc:
-        self.ledger.log(f"{COIN_NAMES[sym]} 行情更新失敗：{exc}", level="ERROR")
+        print(f"{COIN_NAMES[sym]} 行情更新暫時失敗（下輪重試）：{exc}")
     now = datetime.now(UTC)
     if self.ledger.get("bh") is None:  # Buy-and-hold basket (all coins, equal weight) starts with the engine.
       self.ledger.set("bh", {"t": now.isoformat(timespec="seconds"),
@@ -139,10 +139,14 @@ class Engine:
         self.step()
         if self.publisher and time.monotonic() - self.last_publish >= 60:
           self.last_publish = time.monotonic()
-          self.publisher.publish()
+          try:
+            self.publisher.publish()
+          except Exception as pub_exc:
+            print(f"publish failed (will retry next minute): {pub_exc}")
         if self.notifier:
           self.notifier.maybe_daily(self)
       except Exception as exc:
-        self.ledger.log(f"引擎錯誤：{exc}", level="ERROR")
+        msg = str(exc).split("Authorization")[0][:200]
+        self.ledger.log(f"引擎錯誤：{msg}", level="ERROR")
         traceback.print_exc()
       time.sleep(self.loop_seconds)

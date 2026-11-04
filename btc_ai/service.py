@@ -60,10 +60,13 @@ def build_state(ledger, markets: dict) -> dict:
     })
   bh = ledger.get("bh")
   bh_eq = ledger.rows("SELECT ts, value FROM equity WHERE ai='bh' ORDER BY ts")
+  coins_list = [coin_info(markets[s]) for s in COINS if s in markets]
+  btc_compat = coins_list[0] if coins_list else {}
   return {
+      **btc_compat,  # Backwards-compat top-level fields in case a browser cached an older index.html.
       "ui": UI_VERSION,  # The page reloads itself when its own version differs (stale cached page).
       "generated_at": now.isoformat(timespec="seconds"),
-      "coins": [coin_info(markets[s]) for s in COINS if s in markets],
+      "coins": coins_list,
       "notional": NOTIONAL, "ais": ais,
       "bh": {"since": bh["t"] if bh else None,
              "equity": [[e["ts"], round(e["value"], 2)] for e in bh_eq[::max(1, len(bh_eq) // 400)]],
@@ -84,9 +87,20 @@ class Publisher:
   def _git(self, *args):
     token = (CRED / "gh_token").read_text().strip()
     basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
-    extra = ["-c", "credential.helper=", "-c", f"http.https://github.com/.extraheader=Authorization: Basic {basic}"]
-    return subprocess.run(["git", *extra, *args], cwd=self.dir, check=True, capture_output=True, text=True,
-                          env=dict(os.environ, GIT_TERMINAL_PROMPT="0"), timeout=60).stdout
+    env = dict(
+        os.environ,
+        GIT_TERMINAL_PROMPT="0",
+        GIT_CONFIG_COUNT="2",
+        GIT_CONFIG_KEY_0="credential.helper",
+        GIT_CONFIG_VALUE_0="",
+        GIT_CONFIG_KEY_1="http.https://github.com/.extraheader",
+        GIT_CONFIG_VALUE_1=f"Authorization: Basic {basic}",
+    )
+    try:
+      return subprocess.run(["git", *args], cwd=self.dir, check=True, capture_output=True, text=True,
+                            env=env, timeout=60).stdout
+    except subprocess.CalledProcessError as exc:
+      raise RuntimeError(f"git {args[0] if args else ''} failed (exit {exc.returncode})") from None
 
   def publish(self):
     if not (self.dir / ".git").exists():
