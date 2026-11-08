@@ -22,12 +22,15 @@ UTC = timezone.utc
 TPE = timezone(timedelta(hours=8))
 
 
-def select_params(ai: dict, market, now: datetime | None = None, days: int = 365) -> tuple[dict, dict]:
+def select_params(ai: dict, market, now: datetime | None = None, days: int | None = None,
+                  cur_params: dict | None = None) -> tuple[dict, dict]:
   """Weekly self-learning: best grid parameters over the trailing `days` (score = profit - 0.5 x drawdown)."""
   now = now or datetime.now(UTC)
+  days = days or ai.get("lookback_days", 270)
   start = now - timedelta(days=days)
   bars = [b for b in market.bars(ai["tf"], include_live=False) if b.t >= start - timedelta(days=ai["warmup_days"])]
   best, best_score, best_stats = None, None, None
+  cur_score, cur_stats = None, None
   for p in ai["grid"]:
     r = run(ai, bars, p, market.funding)
     trades = [x for x in r.log if x[0] >= start]
@@ -36,11 +39,22 @@ def select_params(ai: dict, market, now: datetime | None = None, days: int = 365
       eq += x[5]
       peak = max(peak, eq)
       dd = max(dd, peak - eq)
+    if r.open_pos and r.open_pos["t"] >= start and bars:
+      u = mark_to_market(ai, r.open_pos, bars[-1].c)
+      eq += u
+      peak = max(peak, eq)
+      dd = max(dd, peak - eq)
     score = eq - 0.5 * dd
+    stats = {"pnl": round(eq), "maxdd": round(dd), "trades": len(trades),
+             "wins": sum(1 for x in trades if x[5] > 0)}
+    if cur_params is not None and p == cur_params:
+      cur_score, cur_stats = score, stats
     if best_score is None or score > best_score:
-      best, best_score = p, score
-      best_stats = {"pnl": round(eq), "maxdd": round(dd), "trades": len(trades),
-                    "wins": sum(1 for x in trades if x[5] > 0)}
+      best, best_score, best_stats = p, score, stats
+  if cur_params is not None and cur_score is not None and best != cur_params:
+    hyst = ai.get("hyst_pct", 0.20)
+    if best_score < cur_score + max(40.0, abs(cur_score) * hyst):
+      return cur_params, cur_stats
   return best, best_stats
 
 
@@ -85,7 +99,7 @@ class Engine:
         coin = COIN_NAMES[sym]
         e = self.era(ai, sym)
         since = datetime.fromisoformat(e["since"])
-        r = run(ai, m.bars(ai["tf"]), e["params"], m.funding)
+        r = run(ai, m.bars(ai["tf"]), e["params"], m.funding, trade_from=since)
         for (et, xt, side, ep, xp, net, why) in r.log:
           if et >= since and self.ledger.add_trade(ai["id"], sym, side, et, ep, xt, xp, net, why, e["params"]):
             msg = f"🏁 {ai['name']}／{coin} 平倉｜{'多' if side == 1 else '空'}單 {ep:,.6g} → {xp:,.6g}｜{net:+,.0f} USDT（{why}）"

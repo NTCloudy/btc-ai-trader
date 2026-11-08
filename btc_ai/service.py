@@ -83,6 +83,7 @@ class Publisher:
   def __init__(self, ledger, markets):
     self.ledger, self.markets = ledger, markets
     self.dir = ROOT / "data" / "publish"
+    self._last_gc = 0.0
 
   def _git(self, *args):
     token = (CRED / "gh_token").read_text().strip()
@@ -108,6 +109,7 @@ class Publisher:
       self._git("init", "-q", "-b", "live-state")
       self._git("config", "user.name", "btc-ai-bot")
       self._git("config", "user.email", "bot@users.noreply.github.com")
+      self._git("config", "core.logAllRefUpdates", "false")
       self._git("remote", "add", "origin", f"https://github.com/{REPO}.git")
     body = json.dumps(build_state(self.ledger, self.markets), ensure_ascii=False, default=str)
     slot = int(time.time() // 60)
@@ -120,6 +122,10 @@ class Publisher:
     self._git("add", "-A")
     has_head = subprocess.run(["git", "rev-parse", "--verify", "HEAD"], cwd=self.dir, capture_output=True).returncode == 0
     self._git("commit", "-q", "--allow-empty", "-m", "state", *(["--amend"] if has_head else []))
+    if time.monotonic() - self._last_gc >= 3600:
+      self._last_gc = time.monotonic()
+      self._git("config", "core.logAllRefUpdates", "false")
+      self._git("gc", "--prune=now", "-q")
     self._git("push", "-q", "-f", "origin", "HEAD:live-state")
 
 
@@ -171,7 +177,7 @@ def weekly(ledger, markets: dict, notifier=None) -> list[str]:
       m = markets[sym]
       key = f"era:{ai['id']}:{sym}"
       era = ledger.get(key)
-      best, stats = select_params(ai, m)
+      best, stats = select_params(ai, m, cur_params=era.get("params") if era else None)
       if era and best == era["params"]:
         kept.append(COIN_NAMES[sym])
         continue

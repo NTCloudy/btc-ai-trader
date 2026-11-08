@@ -8,6 +8,7 @@ AIs see a partial last bar (stops react within the hour; entries still use close
 from __future__ import annotations
 
 import csv
+import fcntl
 import json
 import os
 import pickle
@@ -73,14 +74,28 @@ class Market:
       self.h1.pop()  # Never keep an unfinished hour in the closed list.
 
   def _append(self, bars: list[Bar]):
-    new = [b for b in bars if not self.h1 or b.t > self.h1[-1].t]
-    if not new:
-      return
-    self.h1.extend(new)
-    with open(self.H1, "a", encoding="utf-8", newline="") as f:
-      w = csv.writer(f)
-      for b in new:
-        w.writerow([b.t.isoformat(), b.o, b.h, b.l, b.c, b.v])
+    lock_path = self.H1.with_suffix(".lock")
+    with open(lock_path, "w") as lf:
+      fcntl.flock(lf, fcntl.LOCK_EX)
+      if self.H1.exists():
+        for r in csv.reader(open(self.H1, encoding="utf-8")):
+          if r and r[0][0].isdigit():
+            t = datetime.fromisoformat(r[0])
+            if not self.h1 or t > self.h1[-1].t:
+              self.h1.append(Bar(t, *map(float, r[1:6])))
+      seen = {b.t for b in self.h1}
+      new = []
+      for b in bars:
+        if b.t not in seen and (not self.h1 or b.t > self.h1[-1].t):
+          seen.add(b.t)
+          new.append(b)
+      if not new:
+        return
+      self.h1.extend(new)
+      with open(self.H1, "a", encoding="utf-8", newline="") as f:
+        w = csv.writer(f)
+        for b in new:
+          w.writerow([b.t.isoformat(), b.o, b.h, b.l, b.c, b.v])
 
   def update(self) -> None:
     """Fills the gap since the last closed hour, refreshes the in-progress hour, price, funding."""
@@ -119,7 +134,11 @@ class Market:
     src = self.h1 + ([self.live] if include_live and self.live else [])
     if minutes == 60:
       return [Bar(b.t, b.o, b.h, b.l, b.c, b.v) for b in src]
-    return resample(src, minutes)
+    out = resample(src, minutes)
+    if not include_live and out and src:
+      if src[-1].t + timedelta(hours=1) < out[-1].t + timedelta(minutes=minutes):
+        out.pop()
+    return out
 
   def change_24h(self) -> float | None:
     if not self.price or len(self.h1) < 24:

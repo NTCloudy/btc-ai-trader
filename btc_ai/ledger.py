@@ -18,6 +18,8 @@ class Ledger:
     self.lock = threading.Lock()
     with self.lock:
       self.conn.executescript("""
+        PRAGMA journal_mode=WAL;
+        PRAGMA busy_timeout=30000;
         CREATE TABLE IF NOT EXISTS trades(id INTEGER PRIMARY KEY, ai TEXT, symbol TEXT, side INTEGER, entry_t TEXT,
           entry REAL, exit_t TEXT, exit REAL, pnl REAL, why TEXT, params TEXT, UNIQUE(ai, symbol, entry_t, side));
         CREATE TABLE IF NOT EXISTS equity(ts TEXT, ai TEXT, value REAL);

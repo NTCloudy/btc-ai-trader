@@ -158,8 +158,9 @@ class Book:
       return False
     if self.market == "perp" and self.funding:
       start = int(b.t.timestamp() * 1000)
+      entry_ms = int(p["t"].timestamp() * 1000)
       for hms in range(start - start % 3_600_000, start + minutes * 60_000, 3_600_000):
-        if hms >= start and hms in self.funding and p["last_fund"] != hms:
+        if hms > entry_ms and hms >= start and hms in self.funding and p["last_fund"] != hms:
           p["funding"] += self.funding[hms] * p["qty"] * b.o * p["side"]  # longs pay positive rates
           p["last_fund"] = hms
     s = p["side"]
@@ -170,7 +171,7 @@ class Book:
     if p["tp"] is not None and ((s == 1 and b.h >= p["tp"]) or (s == -1 and b.l <= p["tp"])):
       self.close(b.t, p["tp"], "target")
       return True
-    if p["trail"]:
+    if p["trail"] and b.t > p["t"]:
       p["best"] = max(p["best"], b.h) if s == 1 else min(p["best"], b.l)
       ns = p["best"] - p["trail"] if s == 1 else p["best"] + p["trail"]
       if (s == 1 and ns > p["stop"]) or (s == -1 and ns < p["stop"]):
@@ -179,27 +180,46 @@ class Book:
 
 
 # ----------------------------------------------------------------------------------------------
-# Strategy 1: TREND (Omega-like) — Donchian breakout with EMA filter and ATR trailing stop.
-def trend(bars: list[Bar], market: str, p: dict, notional=10_000, funding=None, minutes=240) -> Result:
+# Strategy 1: TREND (TrendyV2-Pro) — 4h close-price breakout + fast/slow EMA slope + ROC/ATR strength + EMA_fast exit.
+def trend(bars: list[Bar], market: str, p: dict, notional=10_000, funding=None, minutes=240,
+          trade_from: datetime | None = None) -> Result:
   book = Book(market, notional, funding)
   closes = [b.c for b in bars]
-  ef, es, a = ema(closes, p.get("fast", 50)), ema(closes, p.get("slow", 200)), atr(bars, 14)
+  ef, es, a = ema(closes, p.get("fast", 40)), ema(closes, p.get("slow", 200)), atr(bars, 14)
   n = p["lookback"]
-  for i in range(max(n, 210), len(bars)):
+  tp_atr = p.get("tp_atr", 0)
+  req_slow_slope = p.get("req_slow_slope", True)
+  min_roc_atr = p.get("min_roc_atr", 1.5)
+  for i in range(max(n, p.get("slow", 200)) + 12, len(bars)):
     b = bars[i]
+    if trade_from is not None and b.t < trade_from:
+      continue
+    prev = bars[i - 1]
+    if book.pos:
+      s = book.pos["side"]
+      if (s == 1 and prev.c < ef[i - 1]) or (s == -1 and prev.c > ef[i - 1]):
+        book.close(b.t, b.o, "ema_exit")
     if book.pos and book.mark(b, minutes):
       continue
     if book.pos:
       continue
-    hi = max(x.h for x in bars[i - n - 1:i - 1])  # Prior n bars, excluding the signal bar itself.
-    lo = min(x.l for x in bars[i - n - 1:i - 1])
-    prev = bars[i - 1]
+    hi = max(x.c for x in bars[i - n - 1:i - 1])  # Prior n closed bars, excluding the signal bar itself.
+    lo = min(x.c for x in bars[i - n - 1:i - 1])
     k = p["atr_k"] * a[i - 1]
-    if prev.c > hi and ef[i - 1] > es[i - 1]:  # Signal on the closed bar, enter at this bar's open.
-      book.open(b.t, 1, b.o, b.o - k, trail=k)
+    tp_d = tp_atr * a[i - 1] if tp_atr else 0
+    up_ok = prev.c > hi and ef[i - 1] > es[i - 1] and ef[i - 1] >= ef[i - 6]
+    dn_ok = prev.c < lo and ef[i - 1] < es[i - 1] and ef[i - 1] <= ef[i - 6]
+    if req_slow_slope:
+      up_ok = up_ok and (es[i - 1] >= es[i - 12])
+      dn_ok = dn_ok and (es[i - 1] <= es[i - 12])
+    if min_roc_atr > 0 and a[i - 1] > 0:
+      up_ok = up_ok and ((prev.c - closes[i - 1 - n]) / a[i - 1] >= min_roc_atr)
+      dn_ok = dn_ok and ((closes[i - 1 - n] - prev.c) / a[i - 1] >= min_roc_atr)
+    if up_ok:  # Signal on the closed bar, enter at this bar's open.
+      book.open(b.t, 1, b.o, b.o - k, tp=(b.o + tp_d if tp_d else None), trail=None)
       book.mark(b, minutes)
-    elif market == "perp" and p.get("short", True) and prev.c < lo and ef[i - 1] < es[i - 1]:
-      book.open(b.t, -1, b.o, b.o + k, trail=k)
+    elif market == "perp" and p.get("short", True) and dn_ok:
+      book.open(b.t, -1, b.o, b.o + k, tp=(b.o - tp_d if tp_d else None), trail=None)
       book.mark(b, minutes)
   book.r.open_pos = book.pos
   return book.r
@@ -287,36 +307,45 @@ def split_by_time(bars: list[Bar], start: datetime, end: datetime) -> list[Bar]:
   return [b for b in bars if start <= b.t < end]
 
 
-# Strategy 4: MOMENTUM (time-series momentum) on daily bars: hold long while the N-day return and price
-# vs the M-day average are positive (perp: short when both negative). Rebalanced at each daily close.
-def momentum(bars1d: list[Bar], market: str, p: dict, notional=10_000, funding=None) -> Result:
+# Strategy 4: MOMENTUM (time-series momentum) on daily bars: hold long while the N-day return, price vs M-day EMA,
+# and EMA slope are positive (perp: short when all three negative). Rebalanced at each daily open after signal close.
+def momentum(bars1d: list[Bar], market: str, p: dict, notional=10_000, funding=None,
+             trade_from: datetime | None = None) -> Result:
   book = Book(market, notional, funding)
   closes = [b.c for b in bars1d]
   ma = ema(closes, p["ma"])
   a = atr(bars1d, 14)
   n = p["lookback"]
-  for i in range(max(n, p["ma"]) + 1, len(bars1d)):
+  tp_atr = p.get("tp_atr", 0)
+  for i in range(max(n, p["ma"]) + 4, len(bars1d)):
     b = bars1d[i]
-    if book.pos and book.mark(b, 1440):
+    if trade_from is not None and b.t < trade_from:
       continue
     ret = closes[i - 1] / closes[i - 1 - n] - 1
-    want = 1 if (ret > 0 and closes[i - 1] > ma[i - 1]) else (-1 if (market == "perp" and ret < 0 and closes[i - 1] < ma[i - 1]) else 0)
+    ma_up = not p.get("req_slope", True) or ma[i - 1] >= ma[i - 4]
+    ma_dn = not p.get("req_slope", True) or ma[i - 1] <= ma[i - 4]
+    want = (1 if (ret > 0 and closes[i - 1] > ma[i - 1] and ma_up)
+            else (-1 if (market == "perp" and ret < 0 and closes[i - 1] < ma[i - 1] and ma_dn) else 0))
     if book.pos and book.pos["side"] != want:
       book.close(b.t, b.o, "signal")
+    if book.pos and book.mark(b, 1440):
+      continue
     if not book.pos and want:
       k = p["atr_k"] * a[i - 1]
-      book.open(b.t, want, b.o, b.o - want * k, trail=k)
+      tp_d = tp_atr * a[i - 1] if tp_atr else 0
+      book.open(b.t, want, b.o, b.o - want * k, tp=(b.o + want * tp_d if tp_d else None), trail=k)
       book.mark(b, 1440)
   book.r.open_pos = book.pos
   return book.r
 
 
-# Strategy 5: MEAN REVERSION (RSI-2 style) on 4h bars: in a long-term uptrend, buy after a sharp short-term
-# drop, exit on a bounce above the short average or after max_bars; perp also shorts spikes in downtrends.
-def meanrev(bars: list[Bar], market: str, p: dict, notional=10_000, funding=None, minutes=240) -> Result:
+# Strategy 5: MEAN REVERSION (RSI-2 style) on 4h bars: in a confirmed long-term uptrend (EMA slope + EMA50 alignment),
+# buy after a sharp short-term drop, exit on a bounce above EMA5 or after max_bars; perp also shorts spikes in downtrends.
+def meanrev(bars: list[Bar], market: str, p: dict, notional=10_000, funding=None, minutes=240,
+            trade_from: datetime | None = None) -> Result:
   book = Book(market, notional, funding)
   closes = [b.c for b in bars]
-  slow, fast = ema(closes, p["trend"]), ema(closes, 5)
+  slow, mid, fast = ema(closes, p["trend"]), ema(closes, 50), ema(closes, 5)
   a = atr(bars, 14)
   # RSI(2)
   rsi, up, dn = [], 0.0, 0.0
@@ -329,22 +358,27 @@ def meanrev(bars: list[Bar], market: str, p: dict, notional=10_000, funding=None
     dn = (dn * 1 + max(-ch, 0)) / 2
     rsi.append(100 if dn == 0 else 100 - 100 / (1 + up / dn))
   held = 0
-  for i in range(p["trend"] + 2, len(bars)):
+  for i in range(p["trend"] + 12, len(bars)):
     b = bars[i]
+    if trade_from is not None and b.t < trade_from:
+      continue
     if book.pos:
       held += 1
-      if book.mark(b, minutes):
-        continue
       s = book.pos["side"]
       if (s == 1 and closes[i - 1] > fast[i - 1]) or (s == -1 and closes[i - 1] < fast[i - 1]) or held >= p["max_bars"]:
         book.close(b.t, b.o, "exit")
+        continue
+      if book.mark(b, minutes):
+        continue
       continue
     k = p["sl_atr"] * a[i - 1]
-    if closes[i - 1] > slow[i - 1] and rsi[i - 1] < p["rsi_lo"]:
+    up_ok = closes[i - 1] > slow[i - 1] and slow[i - 1] >= slow[i - 10] and mid[i - 1] >= slow[i - 1] * 0.995
+    dn_ok = closes[i - 1] < slow[i - 1] and slow[i - 1] <= slow[i - 10] and mid[i - 1] <= slow[i - 1] * 0.995
+    if up_ok and rsi[i - 1] < p["rsi_lo"]:
       book.open(b.t, 1, b.o, b.o - k)
       held = 0
       book.mark(b, minutes)
-    elif market == "perp" and closes[i - 1] < slow[i - 1] and rsi[i - 1] > 100 - p["rsi_lo"]:
+    elif market == "perp" and dn_ok and rsi[i - 1] > 100 - p["rsi_lo"]:
       book.open(b.t, -1, b.o, b.o + k)
       held = 0
       book.mark(b, minutes)
