@@ -17,19 +17,20 @@ def main(argv=None) -> int:
   a = ap.parse_args(argv)
   from .data import Market
   from .ledger import Ledger
-  from .service import Notifier, Publisher, build_state, weekly
+  from .service import Mailer, Notifier, Publisher, build_state, weekly
   from .ais import COINS
   ledger = Ledger(str(ROOT / "data" / "btc.db"))
   markets = {s: Market(s) for s in COINS}
   notifier = None if a.no_line else Notifier(ledger)
+  mailer = Mailer(ledger)
   if a.cmd == "run":
     from .engine import Engine
-    Engine(ledger, markets, None if a.no_publish else Publisher(ledger, markets), notifier).run_forever()
+    Engine(ledger, markets, None if a.no_publish else Publisher(ledger, markets), notifier, mailer=mailer).run_forever()
     return 0
   for m in markets.values():
     m.update()
   if a.cmd == "weekly":
-    print("\n".join(weekly(ledger, markets, notifier)))
+    print("\n".join(weekly(ledger, markets, notifier, mailer)))
   elif a.cmd == "publish":
     Publisher(ledger, markets).publish()
   else:

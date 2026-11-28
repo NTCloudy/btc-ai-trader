@@ -65,11 +65,20 @@ def mark_to_market(ai: dict, pos: dict, price: float) -> float:
 
 class Engine:
 
-  def __init__(self, ledger, markets: dict, publisher=None, notifier=None, loop_seconds: int = 30):
+  def __init__(self, ledger, markets: dict, publisher=None, notifier=None, loop_seconds: int = 30, mailer=None):
     self.ledger, self.markets, self.publisher, self.notifier = ledger, markets, publisher, notifier
+    self.mailer = mailer  # Email notices for MAIL_SCOPE (Trendy BTC); failures never affect the loop.
     self.loop_seconds = loop_seconds
     self.last_equity = 0.0
     self.last_publish = 0.0
+
+  def _mail(self, fn) -> None:
+    if self.mailer is None:
+      return
+    try:
+      fn()
+    except Exception as exc:  # A notice must never stop trading.
+      print(f"📧 通知建立失敗：{exc}")
 
   def era(self, ai: dict, sym: str) -> dict:
     key = f"era:{ai['id']}:{sym}"
@@ -104,8 +113,7 @@ class Engine:
           if et >= since and self.ledger.add_trade(ai["id"], sym, side, et, ep, xt, xp, net, why, e["params"]):
             msg = f"🏁 {ai['name']}／{coin} 平倉｜{'多' if side == 1 else '空'}單 {ep:,.6g} → {xp:,.6g}｜{net:+,.0f} USDT（{why}）"
             self.ledger.log(msg, ai["id"], "TRADE")
-            if self.notifier:
-              self.notifier.send(msg)
+            self._mail(lambda: self.mailer.exit(ai, sym, side, et, ep, xt, xp, net, why))
         pos = r.open_pos if r.open_pos and r.open_pos["t"] >= since else None
         key = f"pos:{ai['id']}:{sym}"
         prev = self.ledger.get(key)
@@ -117,8 +125,7 @@ class Engine:
             msg = (f"✅ {ai['name']}／{coin} 進場｜{'做多' if pos['side'] == 1 else '放空'} {pos['entry']:,.6g}｜"
                    f"停損 {pos['stop']:,.6g}" + (f"｜停利 {pos['tp']:,.6g}" if pos["tp"] else "｜移動停損"))
             self.ledger.log(msg, ai["id"], "TRADE")
-            if self.notifier:
-              self.notifier.send(msg)
+            self._mail(lambda: self.mailer.entry(ai, sym, info))
           self.ledger.set(key, info)
         elif prev:
           self.ledger.set(key, None)

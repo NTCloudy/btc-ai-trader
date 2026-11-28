@@ -46,3 +46,79 @@ class BtcTests(unittest.TestCase):
 
 if __name__ == "__main__":
   unittest.main()
+
+
+class MailerTests(unittest.TestCase):
+  """User 2026-11-28: email only Trendy's BTC entries/exits; never block or break the engine."""
+
+  def setUp(self):
+    import json
+    import tempfile
+    from btc_ai.ledger import Ledger
+    from btc_ai.service import Mailer
+    self.tmp = tempfile.TemporaryDirectory()
+    d = Path(self.tmp.name)
+    self.ledger = Ledger(str(d / "t.db"))
+    cred = d / "mail.json"
+    cred.write_text(json.dumps({"to": ["x@example.com"], "smtp_user": "u@example.com", "app_password": "p"}))
+    self.sent = []
+    self.m = Mailer(self.ledger, cred_path=cred, send_fn=lambda s, b: self.sent.append((s, b)), wait_s=0)
+    self.Mailer, self.d = Mailer, d
+    self.trendy = [a for a in AIS if a["id"] == "trendy"][0]
+    self.t = datetime(2026, 11, 28, 4, 0, tzinfo=UTC)
+
+  def tearDown(self):
+    self.tmp.cleanup()
+
+  def pos(self, tp=None):
+    return {"side": 1, "entry": 95000.0, "t": self.t.isoformat(), "stop": 93000.0, "tp": tp}
+
+  def test_entry_scope_dedup_and_disclaimer(self):
+    self.assertTrue(self.m.entry(self.trendy, "BTCUSDT", self.pos()))
+    import time as _t
+    _t.sleep(0.2)
+    self.assertEqual(len(self.sent), 1)
+    subj, body = self.sent[0]
+    self.assertIn("進場 做多 @ 95,000.0", subj)
+    self.assertIn("沒有固定停利", body)
+    self.assertIn("模擬交易", body)  # disclaimer
+    self.assertIn("2026-11-28 12:00（台北）", body)
+    self.assertFalse(self.m.entry(self.trendy, "BTCUSDT", self.pos()))  # same entry: not sent twice
+    self.assertFalse(self.m.entry(self.trendy, "ETHUSDT", self.pos()))  # other coin: out of scope
+    momo = [a for a in AIS if a["id"] == "momo"][0]
+    self.assertFalse(self.m.entry(momo, "BTCUSDT", self.pos()))  # other AI: out of scope
+    _t.sleep(0.1)
+    self.assertEqual(len(self.sent), 1)
+
+  def test_exit_body(self):
+    ok = self.m.exit(self.trendy, "BTCUSDT", -1, self.t, 64130.5, self.t + timedelta(days=1), 57487.1, 343.6, "target")
+    import time as _t
+    _t.sleep(0.2)
+    self.assertTrue(ok)
+    subj, body = self.sent[0]
+    self.assertIn("出場 空單 64,130.5 → 57,487.1（+344 USDT）", subj)
+    self.assertIn("停利（達到目標價）", body)
+    self.assertIn("+10.36%", body)
+
+  def test_failure_retries_and_never_raises(self):
+    calls = []
+
+    def boom(s, b):
+      calls.append(1)
+      raise OSError("smtp down")
+    m = self.Mailer(self.ledger, cred_path=self.d / "mail.json", send_fn=boom, retries=3, wait_s=0)
+    self.assertFalse(m.notify("k1", "s", "b", background=False))
+    self.assertEqual(len(calls), 3)
+
+  def test_no_credentials_skips_and_logs(self):
+    m = self.Mailer(self.ledger, cred_path=self.d / "missing.json", send_fn=lambda s, b: self.sent.append(s))
+    self.assertFalse(m.entry(self.trendy, "BTCUSDT", self.pos()))
+    self.assertEqual(self.sent, [])
+    ev = self.ledger.rows("SELECT message FROM events")
+    self.assertTrue(any("尚未設定寄信帳號" in r["message"] for r in ev))
+
+  def test_engine_mail_errors_are_contained(self):
+    from btc_ai.engine import Engine
+    e = Engine(self.ledger, {}, mailer=object())
+    e._mail(lambda: 1 / 0)  # must not raise
+    Engine(self.ledger, {})._mail(lambda: 1 / 0)  # no mailer: not even called

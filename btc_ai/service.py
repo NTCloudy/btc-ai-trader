@@ -129,8 +129,110 @@ class Publisher:
     self._git("push", "-q", "-f", "origin", "HEAD:live-state")
 
 
+# ---- Email notices (user 2026-11-28): only Trendy's BTC entries and exits, by email (not LINE, to keep the free
+# LINE quota for the futures alerts). Recipients and the sending account live outside the repo in
+# ~/.config/tw-futures-ai/mail.json: {"to": [...], "smtp_user": "...", "app_password": "...",
+# "host": "smtp.gmail.com", "port": 465}. Sending runs in a background thread with retries, so a mail failure
+# never blocks or stops the engine loop; each notice is sent at most once (key remembered in the ledger).
+MAIL_SCOPE = {("trendy", "BTCUSDT")}
+WHY_ZH = {"target": "停利（達到目標價）", "stop": "停損／移動停損", "ema_exit": "價格穿越快線（趨勢轉弱）出場",
+          "每週調整參數": "每週調整參數時平倉"}
+DISCLAIMER = ("※ 本信是 BTC AI「模擬交易」（紙上交易，沒有真實下單）的訊號，僅供參考，不是投資建議。"
+              "實際成交價、滑價、手續費與資金費率都可能不同，請自行判斷。")
+
+
+class Mailer:
+
+  def __init__(self, ledger, cred_path: Path | None = None, send_fn=None, retries: int = 3, wait_s: float = 30.0):
+    f = cred_path or CRED / "mail.json"
+    try:
+      self.cfg = json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
+    except Exception as exc:
+      print(f"mail.json 讀取失敗：{exc}")
+      self.cfg = {}
+    self.ledger, self.retries, self.wait_s = ledger, retries, wait_s
+    self._send_fn = send_fn or self._smtp
+
+  def ready(self) -> bool:
+    return bool(self.cfg.get("to") and self.cfg.get("smtp_user") and self.cfg.get("app_password"))
+
+  @staticmethod
+  def wants(ai_id: str, sym: str) -> bool:
+    return (ai_id, sym) in MAIL_SCOPE
+
+  def _smtp(self, subject: str, body: str) -> None:
+    import smtplib
+    import ssl
+    from email.message import EmailMessage
+    to = self.cfg["to"] if isinstance(self.cfg["to"], list) else [self.cfg["to"]]
+    msg = EmailMessage()
+    msg["Subject"], msg["From"], msg["To"] = subject, self.cfg["smtp_user"], ", ".join(to)
+    msg.set_content(body)
+    with smtplib.SMTP_SSL(self.cfg.get("host", "smtp.gmail.com"), int(self.cfg.get("port", 465)),
+                          context=ssl.create_default_context(), timeout=20) as smtp:
+      smtp.login(self.cfg["smtp_user"], str(self.cfg["app_password"]).replace(" ", ""))
+      smtp.send_message(msg)
+
+  def _deliver(self, subject: str, body: str) -> bool:
+    for i in range(self.retries):
+      try:
+        self._send_fn(subject, body)
+        print(f"📧 已寄出：{subject}")
+        return True
+      except Exception as exc:  # Never raise into the engine.
+        print(f"📧 寄信失敗（第 {i + 1}/{self.retries} 次）：{exc}")
+        if i + 1 < self.retries:
+          time.sleep(self.wait_s)
+    return False
+
+  def notify(self, key: str, subject: str, body: str, background: bool = True) -> bool:
+    """Queues one notice. Returns False when it was already sent or no sending account is configured."""
+    sent = self.ledger.get("mail_sent") or []
+    if key in sent:
+      return False
+    self.ledger.set("mail_sent", (sent + [key])[-200:])  # At most once, even if the engine restarts mid-send.
+    if not self.ready():
+      self.ledger.log(f"📧 尚未設定寄信帳號，這封沒有寄出：{subject}", "trendy", "INFO")
+      return False
+    body = f"{body}\n\n{DISCLAIMER}"
+    if background:
+      import threading
+      threading.Thread(target=self._deliver, args=(subject, body), daemon=True).start()
+      return True
+    return self._deliver(subject, body)
+
+  def entry(self, ai: dict, sym: str, pos: dict) -> bool:
+    if not self.wants(ai["id"], sym):
+      return False
+    coin, side = COIN_NAMES[sym], ("做多" if pos["side"] == 1 else "放空")
+    t = datetime.fromisoformat(pos["t"]) if isinstance(pos["t"], str) else pos["t"]
+    stop_txt = f"{pos['stop']:,.1f} USDT（移動停損：價格往有利方向走時會跟著移動，出場時會再寄信通知）"
+    tp_txt = f"{pos['tp']:,.1f} USDT" if pos.get("tp") else "沒有固定停利（觸及移動停損或價格穿越快線時出場）"
+    body = "\n".join([f"{ai['name']}（{ai['title']}）{coin} 永續合約・模擬單", f"動作：進場 {side}",
+                      f"時間：{t.astimezone(TPE):%Y-%m-%d %H:%M}（台北）", f"進場價：{pos['entry']:,.1f} USDT",
+                      f"停損：{stop_txt}", f"停利：{tp_txt}",
+                      f"模擬資金：每個幣 {notional(ai):,.0f} USDT"])
+    return self.notify(f"entry:{ai['id']}:{sym}:{t.isoformat()}",
+                       f"【{ai['name']} {coin} 模擬訊號】進場 {side} @ {pos['entry']:,.1f}", body)
+
+  def exit(self, ai: dict, sym: str, side: int, et, ep: float, xt, xp: float, net: float, why: str) -> bool:
+    if not self.wants(ai["id"], sym):
+      return False
+    coin, s = COIN_NAMES[sym], ("多單" if side == 1 else "空單")
+    pct = (xp - ep) / ep * side * 100 if ep else 0.0
+    body = "\n".join([f"{ai['name']}（{ai['title']}）{coin} 永續合約・模擬單", f"動作：出場（平{s}）",
+                      f"進場：{et.astimezone(TPE):%Y-%m-%d %H:%M} @ {ep:,.1f} USDT",
+                      f"出場：{xt.astimezone(TPE):%Y-%m-%d %H:%M} @ {xp:,.1f} USDT（{pct:+.2f}%）",
+                      f"出場原因：{WHY_ZH.get(why, why)}",
+                      f"損益：{net:+,.1f} USDT（含手續費與資金費率；模擬資金每個幣 {notional(ai):,.0f} USDT）"])
+    return self.notify(f"exit:{ai['id']}:{sym}:{et.isoformat()}:{xt.isoformat()}",
+                       f"【{ai['name']} {coin} 模擬訊號】出場 {s} {ep:,.1f} → {xp:,.1f}（{net:+,.0f} USDT）", body)
+
+
 class Notifier:
-  """LINE (same bot as the futures project). Entry / exit notices + a short daily report at 08:00 Taipei."""
+  """LINE (same bot as the futures project): short daily report at 08:00 Taipei + weekly summary. Per-trade
+  entry / exit LINE notices are off (user 2026-11-17: LINE entry alerts only for the futures Omega); Trendy BTC
+  trades are emailed instead (Mailer)."""
 
   def __init__(self, ledger):
     self.ledger = ledger
@@ -166,7 +268,7 @@ class Notifier:
     self.send("\n".join(lines))
 
 
-def weekly(ledger, markets: dict, notifier=None) -> list[str]:
+def weekly(ledger, markets: dict, notifier=None, mailer=None) -> list[str]:
   """Weekly self-learning: re-select each AI's parameters per coin from the trailing year; switch only if better."""
   from .engine import mark_to_market
   out = [f"每週自主學習 {datetime.now(TPE):%m/%d}"]
@@ -185,8 +287,10 @@ def weekly(ledger, markets: dict, notifier=None) -> list[str]:
       pos = ledger.get(f"pos:{ai['id']}:{sym}")
       if pos and era:  # Close the previous era's position at the current price before switching.
         p = dict(pos, t=datetime.fromisoformat(pos["t"]))
-        ledger.add_trade(ai["id"], sym, pos["side"], p["t"], pos["entry"], now, m.price, mark_to_market(ai, p, m.price),
-                         "每週調整參數", era["params"])
+        net = mark_to_market(ai, p, m.price)
+        if ledger.add_trade(ai["id"], sym, pos["side"], p["t"], pos["entry"], now, m.price, net, "每週調整參數",
+                            era["params"]) and mailer:
+          mailer.exit(ai, sym, pos["side"], p["t"], pos["entry"], now, m.price, net, "每週調整參數")
         ledger.set(f"pos:{ai['id']}:{sym}", None)
       ledger.set(key, {"since": now.isoformat(timespec="seconds"), "params": best, "stats": stats, "reason": "每週調整"})
       changed.append(f"{COIN_NAMES[sym]}（近一年 {stats['pnl']:+,}）")
